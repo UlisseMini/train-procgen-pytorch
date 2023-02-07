@@ -7,6 +7,7 @@ from gym import spaces
 import time
 from collections import deque
 import torch
+import common.env.maze as maze
 
 
 """
@@ -375,3 +376,62 @@ class ScaledFloatFrame(VecEnvWrapper):
     def reset(self):
         obs = self.venv.reset()
         return obs/255.0
+
+
+class DirectGridFrame(VecEnvObservationWrapper):
+    def __init__(self, venv):
+        super().__init__(venv=venv)
+        assert venv.env.options['env_name'].startswith('maze'), 'DirectGridFrame only works with maze environments.'
+
+        # 3 channels: 1 hot encodings for MOUSE, CHEESE, BLOCKED (EMPTY can be inferred)
+        # 25x25 grid: the default when distribution="hard" - TODO: Detect this here.
+        state_bytes_list = self.venv.env.callmethod("get_state")
+        state_vals_list = [maze.parse_maze_state_bytes(sb) for sb in state_bytes_list]
+        world_dim = state_vals_list[0]['world_dim'].val
+
+        self.observation_space = gym.spaces.Box(low=0, high=1, shape=(3, world_dim, world_dim), dtype=np.float32)
+    
+    def process(self, _):
+        """
+        Convert the maze observation image (3,64,64) into a (4,25,25) direct view.
+        4 channels: 1 hot encodings for MOUSE, CHEESE, BLOCKED, EMPTY
+        25x25 grid: the default when distribution="hard", detected for others
+        """
+        # TODO: Optimize by not parsing the whole state (only mouse position changes.)
+        state_bytes_list = self.venv.env.callmethod("get_state")
+        state_vals_list = [maze.parse_maze_state_bytes(sb) for sb in state_bytes_list]
+        grids = [maze.get_grid(sv, with_mouse=True) for sv in state_vals_list]
+
+        obs = np.zeros((len(grids), 3, grids[0].shape[0], grids[0].shape[1]), dtype=np.float32)
+        for i, grid in enumerate(grids):
+            obs[i, 0, grid == maze.MOUSE] = 1
+            obs[i, 1, grid == maze.CHEESE] = 1
+            obs[i, 2, grid == maze.BLOCKED] = 1
+            # obs[i, 3, grid == maze.EMPTY] = 1
+
+        return obs
+
+
+class DirectActionsWrapper(VecEnvWrapper):
+    """
+    Replace the Discrete(15) action space with a Discrete(4) action space for the maze.
+    """
+
+    def __init__(self, venv):
+        super().__init__(venv=venv)
+        assert venv.env.options['env_name'].startswith('maze'), 'DirectActionWrapper only works with maze environments.'
+
+        self.action_space = gym.spaces.Discrete(4)
+
+    def reset(self):
+        return self.venv.reset()
+
+    def step_wait(self):
+        obs, reward, done, info = self.venv.step_wait()
+        return obs, reward, done, info
+
+    def step_async(self, actions):
+        actions = np.array([maze.ORIG_ACT[a] for a in actions])
+        self.venv.step_async(actions)
+
+
